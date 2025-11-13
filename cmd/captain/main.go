@@ -6,7 +6,6 @@ import (
 
 	"github.com/urfave/cli"
 
-	"github.com/tkaefer/captain/internal/compose"
 	"github.com/tkaefer/captain/internal/config"
 	"github.com/tkaefer/captain/internal/projects"
 )
