@@ -13,13 +13,20 @@ import (
 	"github.com/tkaefer/captain/internal/projects"
 )
 
-func loadEnvFiles(cfg config.Config, proj projects.Project, extra []string) ([]string, error) {
+// loadEnvFiles liest zusätzliche Env-Files und baut ein Env-Array auf
+func loadEnvFiles(cfg config.Config, proj projects.Project, extraFiles []string) ([]string, error) {
 	env := os.Environ()
-	all := append(append([]string{}, cfg.EnvFiles...), extra...)
-	seen := map[string]bool{}
 
-	for _, f := range all {
-		if f == "" || seen[f] {
+	allFiles := append([]string{}, cfg.EnvFiles...)
+	allFiles = append(allFiles, extraFiles...)
+
+	seen := make(map[string]bool)
+
+	for _, f := range allFiles {
+		if f == "" {
+			continue
+		}
+		if seen[f] {
 			continue
 		}
 		seen[f] = true
@@ -31,26 +38,50 @@ func loadEnvFiles(cfg config.Config, proj projects.Project, extra []string) ([]s
 
 		file, err := os.Open(path)
 		if err != nil {
+			if cfg.Debug {
+				fmt.Fprintf(os.Stderr, "env file %s not found or unreadable: %v\n", path, err)
+			}
 			continue
 		}
-		defer file.Close()
+		if cfg.Debug {
+			fmt.Fprintf(os.Stderr, "loading env file %s\n", path)
+		}
 
-		sc := bufio.NewScanner(file)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				env = append(env, line)
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
 			}
+			// simple KEY=VALUE
+			// wir machen keine komplexe Shell-Parsing-Magie
+			env = append(env, line)
+		}
+		file.Close()
+
+		if err := scanner.Err(); err != nil && cfg.Debug {
+			fmt.Fprintf(os.Stderr, "error reading env file %s: %v\n", path, err)
 		}
 	}
+
 	return env, nil
 }
 
-func Run(cfg config.Config, proj projects.Project, extraEnv []string, args ...string) error {
+// Run führt docker compose/docker-compose im Projekt aus
+// extraEnvFiles kann z.B. von CLI-Flags kommen (--env-file)
+func Run(cfg config.Config, proj projects.Project, extraEnvFiles []string, args ...string) error {
 	cmdName := cfg.ComposeCommand[0]
 	cmdArgs := append(cfg.ComposeCommand[1:], args...)
 
-	env, _ := loadEnvFiles(cfg, proj, extraEnv)
+	if cfg.Debug {
+		fmt.Fprintf(os.Stderr, "running %s %s in %s\n",
+			cmdName, strings.Join(cmdArgs, " "), proj.Path)
+	}
+
+	env, err := loadEnvFiles(cfg, proj, extraEnvFiles)
+	if err != nil {
+		return err
+	}
 
 	cmd := exec.Command(cmdName, cmdArgs...)
 	cmd.Dir = proj.Path
@@ -65,5 +96,6 @@ func Run(cfg config.Config, proj projects.Project, extraEnv []string, args ...st
 
 	signal.Ignore(os.Interrupt)
 	defer signal.Reset(os.Interrupt)
+
 	return cmd.Wait()
 }

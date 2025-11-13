@@ -17,17 +17,20 @@ type Project struct {
 	Name string
 }
 
-type source struct{ projects []Project }
+type source struct {
+	projects []Project
+}
 
 func (s source) Len() int            { return len(s.projects) }
 func (s source) String(i int) string { return s.projects[i].Name }
 
-func isComposeFileName(n string) bool {
-	switch n {
+func isComposeFileName(name string) bool {
+	switch name {
 	case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 func isBlacklisted(path string, cfg config.Config) bool {
@@ -39,11 +42,13 @@ func isBlacklisted(path string, cfg config.Config) bool {
 	return false
 }
 
+// Collect scans all configured roots for projects
 func Collect(cfg config.Config) []Project {
 	projectMap := make(map[string]Project)
 
 	for _, root := range cfg.Roots {
 		root = filepath.Clean(root)
+
 		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if cfg.Debug {
@@ -56,9 +61,13 @@ func Collect(cfg config.Config) []Project {
 			}
 
 			if d.IsDir() && isBlacklisted(path, cfg) {
+				if cfg.Debug {
+					fmt.Fprintf(os.Stderr, "skip blacklisted dir %s\n", path)
+				}
 				return filepath.SkipDir
 			}
 
+			// Tiefe begrenzen
 			if rel, err := filepath.Rel(root, path); err == nil {
 				depth := 0
 				if rel != "." {
@@ -72,48 +81,80 @@ func Collect(cfg config.Config) []Project {
 				}
 			}
 
-			if d.Type().IsRegular() && isComposeFileName(d.Name()) {
-				dir := filepath.Dir(path)
-				rel, _ := filepath.Rel(root, dir)
-				name := strings.Trim(rel, "/")
-				if name == "" {
-					name = filepath.Base(dir)
-				}
-				projectMap[root+"::"+name] = Project{Path: dir, Name: name}
+			if !d.Type().IsRegular() {
+				return nil
 			}
+
+			if !isComposeFileName(d.Name()) {
+				return nil
+			}
+
+			projDir := filepath.Dir(path)
+			rel, _ := filepath.Rel(root, projDir)
+			name := strings.Trim(rel, string(os.PathSeparator))
+			if name == "" {
+				name = filepath.Base(projDir)
+			}
+
+			key := root + "::" + name
+			projectMap[key] = Project{
+				Path: projDir,
+				Name: name,
+			}
+
 			return nil
 		})
 	}
 
-	var list []Project
+	projects := make([]Project, 0, len(projectMap))
 	for _, p := range projectMap {
-		list = append(list, p)
+		projects = append(projects, p)
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	return list
+
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Name < projects[j].Name
+	})
+
+	if cfg.Debug {
+		fmt.Fprintf(os.Stderr, "found %d projects\n", len(projects))
+	}
+
+	return projects
 }
 
-func Search(cfg config.Config, ps []Project, pat string) (Project, error) {
-	for _, p := range ps {
-		if p.Name == pat {
+func Search(cfg config.Config, projects []Project, pattern string) (Project, error) {
+	if len(projects) == 0 {
+		return Project{}, fmt.Errorf("no projects found")
+	}
+
+	// exakter Treffer
+	for _, p := range projects {
+		if p.Name == pattern {
 			return p, nil
 		}
 	}
 
-	m := fuzzy.FindFrom(pat, source{ps})
-	if len(m) == 0 {
-		return Project{}, fmt.Errorf("no project matching %q", pat)
+	src := source{projects: projects}
+	matches := fuzzy.FindFrom(pattern, src)
+
+	if len(matches) == 0 {
+		return Project{}, fmt.Errorf("no project matching %q found", pattern)
 	}
-	return ps[m[0].Index], nil
+	if len(matches) > 1 && cfg.Debug {
+		fmt.Fprintf(os.Stderr, "multiple matches for %q, choosing %s\n",
+			pattern, matches[0].Str)
+	}
+
+	return projects[matches[0].Index], nil
 }
 
-func PrintList(ps []Project) {
-	if len(ps) == 0 {
+func PrintList(projects []Project) {
+	if len(projects) == 0 {
 		fmt.Println("No projects found.")
 		return
 	}
 	fmt.Println("Discovered projects:")
-	for _, p := range ps {
-		fmt.Printf("  %-30s %s\n", p.Name, p.Path)
+	for _, p := range projects {
+		fmt.Printf("  %-30s  %s\n", p.Name, p.Path)
 	}
 }
